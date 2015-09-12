@@ -212,11 +212,11 @@ static void settings_init(void) {
     settings.use_cas = true;
     settings.access = 0700;
     settings.port = 11211;
-    settings.udpport = 11211;
+    settings.udpport = 11211;   // 这里设置tcp和udp使用同一个端口
     /* By default this string should be NULL for getaddrinfo() */
     settings.inter = NULL;
     settings.maxbytes = 64 * 1024 * 1024; /* default is 64MB */
-    settings.maxconns = 1024;         /* to limit connections-related memory to about 5MB */
+    settings.maxconns = 1024;   // 最多连接数      /* to limit connections-related memory to about 5MB */
     settings.verbose = 0;
     settings.oldest_live = 0;
     settings.oldest_cas = 0;          /* supplements accuracy of oldest_live */
@@ -236,17 +236,12 @@ static void settings_init(void) {
     settings.lru_crawler = false;
     settings.lru_crawler_sleep = 100;
     settings.lru_crawler_tocrawl = 0;
-    settings.lru_maintainer_thread = false;
-    settings.hot_lru_pct = 32;
-    settings.warm_lru_pct = 32;
-    settings.expirezero_does_not_evict = false;
     settings.hashpower_init = 0;
     settings.slab_reassign = false;
     settings.slab_automove = 0;
     settings.shutdown_command = false;
     settings.tail_repair_time = TAIL_REPAIR_TIME_DEFAULT;
     settings.flush_enabled = true;
-    settings.crawls_persleep = 1000;
 }
 
 /*
@@ -2560,6 +2555,7 @@ inline static void process_stats_detail(conn *c, const char *command) {
 }
 
 /* return server specific stats only */
+// lizheng 汇总server端状态
 static void server_stats(ADD_STAT add_stats, conn *c) {
     pid_t pid = getpid();
     rel_time_t now = current_time;
@@ -4032,6 +4028,7 @@ static enum transmit_result transmit(conn *c) {
     }
 }
 
+//lizheng 重要！！！
 static void drive_machine(conn *c) {
     bool stop = false;
     int sfd;
@@ -4090,6 +4087,7 @@ static void drive_machine(conn *c) {
                 }
             }
 
+            // lizheng 如果已连接数超限，提示client并关闭socket，否则就分发该socket到某一工作线程
             if (settings.maxconns_fast &&
                 stats.curr_conns + stats.reserved_fds >= settings.maxconns - 1) {
                 str = "ERROR Too many open connections\r\n";
@@ -4099,6 +4097,7 @@ static void drive_machine(conn *c) {
                 stats.rejected_conns++;
                 STATS_UNLOCK();
             } else {
+				//lizheng, 将新到的socket分发到工作线程中
                 dispatch_conn_new(sfd, conn_new_cmd, EV_READ | EV_PERSIST,
                                      DATA_BUFFER_SIZE, tcp_transport);
             }
@@ -4362,7 +4361,7 @@ static void drive_machine(conn *c) {
             assert(false);
             break;
         }
-    }
+    }    // end of while
 
     return;
 }
@@ -4509,6 +4508,7 @@ static int server_socket(const char *interface,
         if (IS_UDP(transport)) {
             maximize_sndbuf(sfd);
         } else {
+            // lizheng 此处设置了SO_KEEPALIVE、SO_LINGER、TCP_NODELAY
             error = setsockopt(sfd, SOL_SOCKET, SO_KEEPALIVE, (void *)&flags, sizeof(flags));
             if (error != 0)
                 perror("setsockopt");
@@ -5624,6 +5624,8 @@ int main (int argc, char **argv) {
         perror("failed to ignore SIGPIPE; sigaction");
         exit(EX_OSERR);
     }
+
+    // lizheng 设置工作者线程
     /* start up worker threads if MT mode */
     memcached_thread_init(settings.num_threads, main_base);
 

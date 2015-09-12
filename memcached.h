@@ -233,6 +233,7 @@ struct slab_stats {
 /**
  * Stats stored per-thread.
  */
+// lizheng 每一个线程状态（便于统计、分析、Debug）
 struct thread_stats {
     pthread_mutex_t   mutex;
     uint64_t          get_cmds;
@@ -243,10 +244,10 @@ struct thread_stats {
     uint64_t          incr_misses;
     uint64_t          decr_misses;
     uint64_t          cas_misses;
-    uint64_t          bytes_read;
-    uint64_t          bytes_written;
-    uint64_t          flush_cmds;
-    uint64_t          conn_yields; /* # of yields for connections (-R option)*/
+    uint64_t          bytes_read;         // 接收到的数据
+    uint64_t          bytes_written;      // 发送的数据
+    uint64_t          flush_cmds;         // 
+    uint64_t          conn_yields; // 线程休眠的次数，和 reqs_per_event有关/* # of yields for connections (-R option)*/
     uint64_t          auth_cmds;
     uint64_t          auth_errors;
     struct slab_stats slab_stats[MAX_NUMBER_OF_SLAB_CLASSES];
@@ -298,7 +299,7 @@ struct stats {
  */
 struct settings {
     size_t maxbytes;
-    int maxconns;
+    int maxconns;           //lizheng 最多连接数
     int port;
     int udpport;
     char *inter;
@@ -314,14 +315,14 @@ struct settings {
     int num_threads_per_udp; /* number of worker threads serving each udp socket */
     char prefix_delimiter;  /* character that marks a key prefix (for stats) */
     int detail_enabled;     /* nonzero if we're collecting detailed stats */
-    int reqs_per_event;     /* Maximum number of io to process on each
+    int reqs_per_event;     /* Maximum number of io to process on each  每次io事件发生时最多处理的请求数，避免其他线程饥饿
                                io-event. */
     bool use_cas;
     enum protocol binding_protocol;
     int backlog;
     int item_size_max;        /* Maximum item size, and upper end for slabs */
     bool sasl;              /* SASL on/off */
-    bool maxconns_fast;     /* Whether or not to early close connections */
+    bool maxconns_fast;     /* Whether or not to early close connections */ //lizheng 是否尽早关闭连接，应该是配合maxconns使用
     bool lru_crawler;        /* Whether or not to enable the autocrawler thread */
     bool lru_maintainer_thread; /* LRU maintainer background thread */
     bool slab_reassign;     /* Whether or not slab reassignment is allowed */
@@ -398,6 +399,9 @@ typedef struct {
     uint32_t        remaining;  /* Max keys to crawl per slab per invocation */
 } crawler;
 
+// lizheng 重要 用于 main thread 与 worker thread 之间通信
+// 主进程每次创建一个工作线程的时候，都会创建一个 pipe，对应的是 notify_send_fd 和 notify_receive_fd
+// 每当有新的连接请求的时候，主进程就会往notify_send_fd里写数据来通知工作线程，子线程接到消息之后会创建新的 connection
 typedef struct {
     pthread_t thread_id;        /* unique ID of this thread */
     struct event_base *base;    /* libevent handle this thread uses */
@@ -416,6 +420,7 @@ typedef struct {
 
 /**
  * The structure representing a connection into memcached.
+ * 每个请求连接
  */
 typedef struct conn conn;
 struct conn {
@@ -429,11 +434,13 @@ struct conn {
     short  ev_flags;
     short  which;   /** which events were just triggered */
 
+    // lizheng 读缓冲区
     char   *rbuf;   /** buffer to read commands into */
     char   *rcurr;  /** but if we parsed some already, this is where we stopped */
     int    rsize;   /** total allocated size of rbuf */
     int    rbytes;  /** how much data, starting from rcur, do we have unparsed */
 
+    // lizheng 写缓冲区
     char   *wbuf;
     char   *wcurr;
     int    wsize;

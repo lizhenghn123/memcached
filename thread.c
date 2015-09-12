@@ -17,6 +17,16 @@
 
 #define ITEMS_PER_ALLOC 64
 
+// 值得一看：
+// 1. 多线程模型，主从线程之间通过pipe通信；
+// 2. libevent网络库的多线程使用；
+// 3. SLAB内存分配策略
+// 4. Memcached通信协议
+// 5. Consistent Hashing
+// 6. LRU策略
+// 7. UNIX domain,UDP,TCP客户端连接
+// 8. Memcached的分布式
+
 /* An item in the connection queue. */
 typedef struct conn_queue_item CQ_ITEM;
 struct conn_queue_item {
@@ -247,6 +257,7 @@ static void cq_push(CQ *cq, CQ_ITEM *item) {
 /*
  * Returns a fresh connection queue item.
  */
+// lizheng 相当于对象池，找一个空闲CQ_ITEM
 static CQ_ITEM *cqi_new(void) {
     CQ_ITEM *item = NULL;
     pthread_mutex_lock(&cqi_freelist_lock);
@@ -289,6 +300,7 @@ static CQ_ITEM *cqi_new(void) {
 /*
  * Frees a connection queue item (adds it to the freelist.)
  */
+//lizheng free CQ_ITEM, 实际上是归还到空闲链表里 
 static void cqi_free(CQ_ITEM *item) {
     pthread_mutex_lock(&cqi_freelist_lock);
     item->next = cqi_freelist;
@@ -299,6 +311,7 @@ static void cqi_free(CQ_ITEM *item) {
 
 /*
  * Creates a worker thread.
+ * lizheng，创建工作线程
  */
 static void create_worker(void *(*func)(void *), void *arg) {
     pthread_t       thread;
@@ -327,6 +340,7 @@ void accept_new_conns(const bool do_accept) {
 /*
  * Set up a thread's information.
  */
+// lizheng 初始化LIBEVENT_THREAD：为每个线程绑定一个event loop；创建同步队列
 static void setup_thread(LIBEVENT_THREAD *me) {
     me->base = event_init();
     if (! me->base) {
@@ -367,6 +381,7 @@ static void setup_thread(LIBEVENT_THREAD *me) {
 /*
  * Worker thread: main event loop
  */
+// lizheng 重要工作线程回调函数(其实就是每个线程执行自己的event loop，借以实现多线程的reactor模型)
 static void *worker_libevent(void *arg) {
     LIBEVENT_THREAD *me = arg;
 
@@ -385,20 +400,25 @@ static void *worker_libevent(void *arg) {
  * Processes an incoming "handle a new connection" item. This is called when
  * input arrives on the libevent wakeup pipe.
  */
+// lizheng 每个工作线程用于响应 notify_receive_fd 端有可读数据的回调函数（响应通知，表示有新的连接到来）
+// 此时从该线程的队列中取出新的item，并创建新的连接，
 static void thread_libevent_process(int fd, short which, void *arg) {
     LIBEVENT_THREAD *me = arg;
     CQ_ITEM *item;
     char buf[1];
 
+	//      // 先从pipe fd中读掉
     if (read(fd, buf, 1) != 1)
         if (settings.verbose > 0)
             fprintf(stderr, "Can't read from libevent pipe\n");
 
     switch (buf[0]) {
     case 'c':
+    // 表示有新的连接压入了本线程的队列中，notify_send_fd所发送
     item = cq_pop(me->new_conn_queue);
 
     if (NULL != item) {
+        // 创建新的conn，并绑定到本线程上的reactor（event_base）上
         conn *c = conn_new(item->sfd, item->init_state, item->event_flags,
                            item->read_buffer_size, item->transport, me->base);
         if (c == NULL) {
@@ -433,6 +453,8 @@ static int last_thread = -1;
  * from the main thread, either during initialization (for UDP) or because
  * of an incoming connection.
  */
+// 封装新到来的socket，并发送到某一工作线程的队列里，通常在主线程中被调用
+// 用以实现主线程与工作线程的通信
 void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
                        int read_buffer_size, enum network_transport transport) {
     CQ_ITEM *item = cqi_new();
@@ -444,6 +466,7 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
         return ;
     }
 
+    // round robin选择一个工作线程
     int tid = (last_thread + 1) % settings.num_threads;
 
     LIBEVENT_THREAD *thread = threads + tid;
@@ -456,11 +479,13 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
     item->read_buffer_size = read_buffer_size;
     item->transport = transport;
 
+    //lizheng 因为每个线程都有一个工作队列，将该次请求的参数压入到该线程队列中
     cq_push(thread->new_conn_queue, item);
 
     MEMCACHED_CONN_DISPATCH(sfd, thread->thread_id);
     buf[0] = 'c';
     if (write(thread->notify_send_fd, buf, 1) != 1) {
+	    // 通知该线程（通过pipe fd）
         perror("Writing to thread notify pipe");
     }
 }
@@ -643,6 +668,7 @@ void threadlocal_stats_reset(void) {
     }
 }
 
+// lizheng 汇总所有工作线程的内部状态
 void threadlocal_stats_aggregate(struct thread_stats *stats) {
     int ii, sid;
 
@@ -721,6 +747,7 @@ void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out) {
  * nthreads  Number of worker event handler threads to spawn
  * main_base Event base for main thread
  */
+// lizheng 设置工作者线程, memcached网络库使用的是libevent（单线程），从此处将libevent扩展成多线程应用 
 void memcached_thread_init(int nthreads, struct event_base *main_base) {
     int         i;
     int         power;
@@ -776,6 +803,7 @@ void memcached_thread_init(int nthreads, struct event_base *main_base) {
     dispatcher_thread.base = main_base;
     dispatcher_thread.thread_id = pthread_self();
 
+    //lizheng 创建nthreads个线程，每个线程一对pipe fd， 用于和主线程进行同步
     for (i = 0; i < nthreads; i++) {
         int fds[2];
         if (pipe(fds)) {
@@ -791,6 +819,7 @@ void memcached_thread_init(int nthreads, struct event_base *main_base) {
         stats.reserved_fds += 5;
     }
 
+    // 创建线程
     /* Create threads after we've done all the libevent setup. */
     for (i = 0; i < nthreads; i++) {
         create_worker(worker_libevent, &threads[i]);
